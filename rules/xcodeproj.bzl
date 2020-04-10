@@ -32,17 +32,30 @@ def _xcodeproj_aspect_impl(target, ctx):
     if AppleBundleInfo in target:
         bundle_info = target[AppleBundleInfo]
         srcs = []
+
         bazel_name = target.label.name
+        test_host_appname = None
+        external_infoplist_file = None
+
+        if ctx.rule.kind == "ios_unit_test":
+            test_host_target = getattr(ctx.rule.attr, "test_host", None)
+            if test_host_target and test_host_target.label.package != "rules/test_host_app":
+                test_host_appname = test_host_target.label.name
+
+
         info = struct(
             name = bundle_info.bundle_name,
+            bundle_id = getattr(ctx.rule.attr, 'bundle_id', None),
             bundle_extension = bundle_info.bundle_extension,
             package = target.label.package,
             bazel_name = bazel_name,
             srcs = depset(srcs, transitive = _get_attr_values_for_name(deps, _SrcsInfo, "srcs")),
             build_files = depset([ctx.build_file_path], transitive = _get_attr_values_for_name(deps, _SrcsInfo, "build_files")),
             product_type = bundle_info.product_type[len("com.apple.product-type."):],
-            runtime_env_vars = getattr(ctx.rule.attr, 'env', None),
-            runtime_cli_args = getattr(ctx.rule.attr, 'args', None),
+            runtime_env_vars = getattr(ctx.rule.attr, 'env', {}),
+            runtime_cli_args = getattr(ctx.rule.attr, 'args', []),
+            test_host_appname = test_host_appname,
+            # infoplists = getattr(ctx.rule.files, "infoplists", []),
         )
         providers.append(
             _SrcsInfo(
@@ -57,11 +70,13 @@ def _xcodeproj_aspect_impl(target, ctx):
         srcs = []
         info = struct(
             name = target.label.name,
+            bundle_id = None,
             package = target.label.package,
             bazel_name = target.label.name,
             srcs = depset(srcs, transitive = _get_attr_values_for_name(deps, _SrcsInfo, "srcs")),
             build_files = depset([ctx.build_file_path], transitive = _get_attr_values_for_name(deps, _SrcsInfo, "build_files")),
             product_type = "framework",
+            # external_infoplist_file = None,
         )
         target_info = _TargetInfo(target = info, targets = depset([info], transitive = _get_attr_values_for_name(deps, _TargetInfo, "targets")))
         providers.append(target_info)
@@ -144,22 +159,58 @@ def _xcodeproj_impl(ctx):
 
     xcodeproj_targets_by_name = {}
     xcodeproj_schemes_by_name = {}
+    test_host_appnames = {}
+    external_plists_to_generate = []
+    for target_info in targets:
+        test_host_appname = getattr(target_info, 'test_host_appname', None)
+        if test_host_appname:
+            test_host_appnames[test_host_appname] = 1 # how do i do sets
+
     for target_info in targets:
         target_macho_type = "staticlib" if target_info.product_type == "framework" else "$(inherited)"
-        xcodeproj_targets_by_name[target_info.name] = {
-            'sources': [{
+        target_settings = {
+            'PRODUCT_NAME': target_info.name,
+            'BAZEL_PACKAGE': target_info.package,
+            'MACH_O_TYPE': target_macho_type,
+            'PRODUCT_BUNDLE_IDENTIFIER': target_info.bundle_id,
+        }
+        target_dependencies = []
+        test_host_appname = getattr(target_info, 'test_host_appname', None)
+        if test_host_appname:
+            target_dependencies.append({'target': test_host_appname})
+            target_settings['TEST_HOST'] = "$(BUILT_PRODUCTS_DIR)/{test_host_appname}.app/{test_host_appname}".format(test_host_appname = test_host_appname)
+
+
+        srcs_for_target = [{
                             'path': paths.join(src_dot_dots, s.short_path),
                             'group': paths.dirname(s.short_path),
                             'validate': False
-                        } for s in target_info.srcs.to_list()],
+                        } for s in target_info.srcs.to_list()]
+        if target_info.name in test_host_appnames: # and len(target_info.infoplists) > 0:
+            # if len(target_info.infoplists) > 1:
+            #     fail("too many plists found")
+            # info = target_info.infoplists[0]
+            # plist_file_buildsetting = None
+            # if info.path.startswith('external/'):
+            relative_file_path = "dummy-testhostapp-plists/%s-Info.plist" % target_info.name
+            external_plists_to_generate.append(relative_file_path)
+            # else:
+            #     plist_file_buildsetting = paths.join(src_dot_dots, info.short_path)
+            #     srcs_for_target.append({
+            #                 'path': paths.join(src_dot_dots, info.short_path),
+            #                 'group': paths.dirname(info.short_path),
+            #                 'validate': False
+            #             })
+            target_settings['INFOPLIST_FILE'] = "$PROJECT_FILE_PATH/%s" % (relative_file_path)
+            target_settings['GENERATE_PKGINFO_FILE'] = False
+
+        xcodeproj_targets_by_name[target_info.name] = {
+            'sources': srcs_for_target,
             'type': target_info.product_type,
             'platform': 'iOS',
-            'settings': {
-                'PRODUCT_NAME': target_info.name,
-                'BAZEL_PACKAGE': target_info.package,
-                'MACH_O_TYPE': target_macho_type,
-            },
-            'preBuildScripts': {
+            'settings': target_settings,
+            'dependencies': target_dependencies,
+            'preBuildScripts': [{
                 'name': 'Build with bazel',
                 'script': """
 set -eux
@@ -168,21 +219,26 @@ cd $BAZEL_WORKSPACE_ROOT
 $BAZEL_PATH build $BAZEL_PACKAGE:{bazel_name}
 $BAZEL_INSTALLER
 """.format(bazel_name = target_info.bazel_name)
-            }
+            }]
         }
         if target_info.product_type == "framework":
             continue
+
         scheme_action_name = "test"
         if target_info.product_type == "application":
             scheme_action_name = "run"
         scheme_action_details = {'targets': [target_info.name]}
 
-        runtime_env_vars = getattr(target_info, 'runtime_env_vars', None)
-        if runtime_env_vars:
-            scheme_action_details['environmentVariables'] = runtime_env_vars
-        runtime_cli_args = getattr(target_info, 'runtime_cli_args', None)
-        if runtime_cli_args:
-            scheme_action_details['commandLineArguments'] = runtime_cli_args
+        runtime_env_vars = {}
+        for k,v in getattr(target_info, 'runtime_env_vars', {}).items():
+            if ctx.attr.scheme_existing_envvar_overrides.get(k, None):
+                runtime_env_vars[k] = ctx.attr.scheme_existing_envvar_overrides[k]
+            else:
+                runtime_env_vars[k] = v
+        scheme_action_details['environmentVariables'] = runtime_env_vars
+
+        runtime_cli_args = getattr(target_info, 'runtime_cli_args', [])
+        scheme_action_details['commandLineArguments'] = runtime_cli_args
 
         xcodeproj_schemes_by_name[target_info.name] = {
             'build': {
@@ -229,14 +285,23 @@ $BAZEL_INSTALLER
         is_executable = True,
     )
 
+    generated_testhostapp_plist_files = []
+    # TODO : uniq(external_plists_to_generate)
+    for new_file_path in external_plists_to_generate:
+        new_file = ctx.actions.declare_file("%s" % (new_file_path))
+        ctx.actions.expand_template(
+            substitutions = {},
+            template = ctx.file._info_plist_template,
+            output = new_file,
+        )
+        generated_testhostapp_plist_files.append(new_file)
+
     return [
         DefaultInfo(
             executable = install_script,
-            # files = depset([xcodegen_jsonfile]),
             files = depset([xcodegen_jsonfile, project]),
             runfiles = ctx.runfiles(files = [xcodegen_jsonfile, project], transitive_files = depset(
-                direct =
-                    ctx.files.installer + ctx.files.clang_stub + ctx.files.ld_stub + ctx.files.swiftc_stub,
+                direct = ctx.files.installer + ctx.files.clang_stub + ctx.files.ld_stub + ctx.files.swiftc_stub + generated_testhostapp_plist_files,
                 transitive = [ctx.attr.installer[DefaultInfo].default_runfiles.files],
             )),
         ),
@@ -250,6 +315,8 @@ xcodeproj = rule(
         "project_name": attr.string(mandatory = False),
         "bazel_path": attr.string(mandatory = False, default = "bazel"),
         "_xcodeproj_installer_template": attr.label(executable = False, default = Label("//tools/xcodeproj-shims:xcodeproj-installer.sh"), allow_single_file = ["sh"]),
+        "_info_plist_template": attr.label(executable = False, default = Label("//rules/test_host_app:Info.plist"), allow_single_file = ["plist"]),
+        "scheme_existing_envvar_overrides": attr.string_dict(allow_empty=True, default={}, mandatory=False),
         "_xcodegen": attr.label(executable = True, default = Label("@com_github_yonaskolb_xcodegen//:xcodegen"), cfg = "host"),
         "clang_stub": attr.label(executable = True, default = Label("//tools/xcodeproj-shims:clang-stub"), cfg = "host"),
         "ld_stub": attr.label(executable = True, default = Label("//tools/xcodeproj-shims:ld-stub"), cfg = "host"),
