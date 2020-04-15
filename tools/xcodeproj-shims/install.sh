@@ -39,6 +39,9 @@ rsync --quiet \
     --recursive --chmod=u+w --delete \
     "$input" "$output"
 
+# this sux
+# rm -rf $TARGET_BUILD_DIR/../../Intermediates.noindex/
+
 
 # Part of the build intermediary output will be swiftmodule files
 # which XCode will use for indexing. Let's keep those.
