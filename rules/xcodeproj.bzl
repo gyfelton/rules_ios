@@ -180,12 +180,15 @@ def _xcodeproj_impl(ctx):
             target_dependencies.append({'target': test_host_appname})
             target_settings['TEST_HOST'] = "$(BUILT_PRODUCTS_DIR)/{test_host_appname}.app/{test_host_appname}".format(test_host_appname = test_host_appname)
 
-
-        srcs_for_target = [{
-                            'path': paths.join(src_dot_dots, s.short_path),
-                            'group': paths.dirname(s.short_path),
-                            'validate': False
-                        } for s in target_info.srcs.to_list()]
+        srcs_for_target = []
+        for s in target_info.srcs.to_list():
+            xc_src = {
+                'path': paths.join(src_dot_dots, s.short_path),
+                'group': paths.dirname(s.short_path),
+            }
+            if ".xcassets" in s.path:
+                xc_src['buildPhase'] = 'none'
+            srcs_for_target.append(xc_src)
         if target_info.name in test_host_appnames: # and len(target_info.infoplists) > 0:
             # if len(target_info.infoplists) > 1:
             #     fail("too many plists found")
@@ -202,6 +205,7 @@ def _xcodeproj_impl(ctx):
             #                 'validate': False
             #             })
             target_settings['INFOPLIST_FILE'] = "$PROJECT_FILE_PATH/%s" % (relative_file_path)
+            target_settings['DONT_GENERATE_INFOPLIST_FILE'] = True
             target_settings['GENERATE_PKGINFO_FILE'] = False
 
         xcodeproj_targets_by_name[target_info.name] = {
