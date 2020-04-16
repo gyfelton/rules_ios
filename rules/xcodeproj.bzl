@@ -151,12 +151,21 @@ def _xcodeproj_impl(ctx):
     xcodeproj_schemes_by_name = {}
     for target_info in targets:
         target_macho_type = "staticlib" if target_info.product_type == "framework" else "$(inherited)"
+        xcode_sources = []
+        for s in target_info.srcs.to_list():
+            src_info = {
+                            "path": paths.join(src_dot_dots, s.short_path),
+                            "group": paths.dirname(s.short_path),
+                            "optional": True,
+            }
+            if ".xcassets" in s.path:
+                # By default, xcasset files are associated with the CompileAssetCatalog build phase.
+                # Since we do not know how to stub out xcode's CompileAssetCatalog implementation (yet), we
+                # will just avoid adding this file to a build phase.
+                src_info['buildPhase'] = 'none'
+            xcode_sources.append(src_info)
         xcodeproj_targets_by_name[target_info.name] = {
-            "sources": [{
-                "path": paths.join(src_dot_dots, s.short_path),
-                "group": paths.dirname(s.short_path),
-                "optional": True,
-            } for s in target_info.srcs.to_list()],
+            "sources": xcode_sources,
             "type": target_info.product_type,
             "platform": "iOS",
             "settings": {
